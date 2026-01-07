@@ -1,0 +1,104 @@
+import torch
+import torch.nn as nn
+
+from base.layers import Conv2dWithConstraint, LinearWithConstraint
+#from utils.utils import initialize_weight
+
+torch.set_printoptions(linewidth=1000)
+
+'''
+weight_init_method: xavier_uni
+
+T1: 25
+F1: 40
+F2: 40
+P1_T: 75
+P1_S: 15
+drop_out: 0.5
+pool_mode: mean
+last_dim: 2760  # time point 1125
+'''
+
+
+class ShallowConvNet(nn.Module):
+    def __init__(
+            self,
+            n_classes,
+            input_shape,
+            F1=None,
+            T1=None,
+            F2=None,
+            P1_T=None,
+            P1_S=None,
+            drop_out=None,
+            pool_mode="mean",
+            #weight_init_method=xavier_uni,
+            last_dim=None,
+    ):
+        super(ShallowConvNet, self).__init__()
+        b, c, s, t = input_shape
+        pooling_layer = dict(max=nn.MaxPool2d, mean=nn.AvgPool2d)[pool_mode]
+        self.net = nn.Sequential(
+            Conv2dWithConstraint(1, F1, (1, T1), max_norm=2),
+            Conv2dWithConstraint(F1, F2, (s, 1), bias=False, max_norm=2),
+            nn.BatchNorm2d(F2),
+            ActSquare(),
+            pooling_layer((1, P1_T), (1, P1_S)),
+            ActLog(),
+            nn.Dropout(drop_out),
+            nn.Flatten(),
+            LinearWithConstraint(last_dim, n_classes, max_norm=0.5)
+        )
+
+        #initialize_weight(self, weight_init_method)
+    def weights_init(self):
+        def weights_init(m):
+             if isinstance(m, nn.Conv2d):
+                 torch.nn.init.xavier_uniform(m.weight.data)
+             if isinstance(m,nn.Linear):
+                 torch.nn.init.xavier_uniform(m.weight.data)
+                 m.bias.data.fill_(0.01) 
+
+    def forward(self, x):
+        out = self.net(x)
+        return out
+
+
+class ActSquare(nn.Module):
+    def __init__(self):
+        super(ActSquare, self).__init__()
+        pass
+
+    def forward(self, x):
+        return torch.square(x)
+
+
+class ActLog(nn.Module):
+    def __init__(self, eps=1e-06):
+        super(ActLog, self).__init__()
+        self.eps = eps
+
+    def forward(self, x):
+        return torch.log(torch.clamp(x, min=self.eps))
+
+
+
+if __name__=="__main__":
+
+     from thop import profile
+     net=ShallowConvNet(n_classes=3,input_shape=[1,1,60,512], F1=40, T1=25, F2=40, P1_T=75, P1_S=15, drop_out=0.5,last_dim=1120).cuda()
+     input=torch.randn(1,1,60,512).cuda()
+     from torchinfo import summary
+     summary(net.cuda(), (1, 1,60,512))
+     macs, params = profile(net, inputs=(input, ))
+     print('macs', macs, 'params', params)
+     from thop import clever_format
+     macs, params = clever_format([macs, params], "%.3f")
+     print('macs', macs, 'params', params)
+
+     with torch.autograd.profiler.profile(profile_memory=True, use_cuda=True) as prof:
+         # Run the model forward pass
+         output = net(input)
+
+     # Print profiling results
+     print(prof)
